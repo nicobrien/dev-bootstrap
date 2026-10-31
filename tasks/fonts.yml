@@ -1,0 +1,18 @@
+---
+- name: Create MesloLGS NF font directory
+  ansible.builtin.file:
+    path: "{{ meslo_font_dir }}"
+    state: directory
+    mode: '0755'
+- name: Download verified MesloLGS NF fonts
+  ansible.builtin.get_url:
+    url: "https://raw.githubusercontent.com/romkatv/powerlevel10k-media/{{ meslo_font_revision }}/{{ item.name | urlencode }}"
+    checksum: "{{ item.checksum }}"
+    dest: "{{ meslo_font_dir }}/{{ item.name }}"
+    mode: '0644'
+  loop: "{{ meslo_fonts }}"
+  register: meslo_font_downloads
+- name: Refresh user font cache
+  ansible.builtin.command:
+    argv: [fc-cache, '-f', '{{ meslo_font_dir }}']
+  when: meslo_font_downloads is changed

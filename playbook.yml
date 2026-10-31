@@ -1,0 +1,202 @@
+---
+- name: Bootstrap this developer workstation
+  hosts: localhost
+  connection: local
+  gather_facts: true
+  vars_files:
+    - packages.yml
+  vars:
+    developer_home: "{{ ansible_facts.env.HOME }}"
+    developer_user: "{{ ansible_facts.user_id }}"
+    config_home: "{{ ansible_facts.env.XDG_CONFIG_HOME | default(developer_home + '/.config', true) }}"
+    cache_dir: "{{ developer_home }}/.cache/dev-bootstrap"
+    nvm_dir: "{{ developer_home }}/.nvm"
+    node_bin_dir: "{{ nvm_dir }}/versions/node/v{{ node_version }}/bin"
+    meslo_font_dir: "{{ ansible_facts.env.XDG_DATA_HOME | default(developer_home + '/.local/share', true) }}/fonts/MesloLGS-NF"
+    oh_my_zsh_dir: "{{ developer_home }}/.oh-my-zsh"
+    cargo_dir: "{{ ansible_facts.env.CARGO_HOME | default(developer_home + '/.cargo', true) }}"
+    rustup_dir: "{{ ansible_facts.env.RUSTUP_HOME | default(developer_home + '/.rustup', true) }}"
+    config_backup_dir: "{{ developer_home }}/.local/state/dev-bootstrap/backup"
+  pre_tasks:
+    - name: Check supported platform and account
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.os_family == 'Debian'
+          - ansible_facts.architecture == 'x86_64'
+          - ansible_facts.user_uid != 0
+          - enabled_package_groups | difference(apt_package_groups.keys() | list) | length == 0
+        fail_msg: Run as a normal user on an amd64 Debian/Ubuntu/Mint workstation.
+    - name: Read distribution metadata
+      ansible.builtin.shell: |
+        . /etc/os-release
+        printf '%s\n%s\n%s\n' "$ID" "${UBUNTU_CODENAME:-$VERSION_CODENAME}" "$VERSION_ID"
+      register: distro
+      changed_when: false
+      check_mode: false
+    - name: Set repository distribution
+      ansible.builtin.set_fact:
+        repo_os: "{{ 'ubuntu' if distro.stdout_lines[0] in ['ubuntu', 'linuxmint'] else 'debian' }}"
+        repo_suite: "{{ distro.stdout_lines[1] }}"
+    - name: Check repository support before changing the machine
+      ansible.builtin.assert:
+        that:
+          - distro.stdout_lines[0] in ['ubuntu', 'linuxmint', 'debian']
+          - (repo_os == 'ubuntu' and repo_suite in ['jammy', 'noble', 'questing', 'resolute']) or (repo_os == 'debian' and distro.stdout_lines[2] in ['12', '13'])
+        fail_msg: This distribution needs an explicit repository mapping added first.
+    - name: Create user directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+      loop:
+        - "{{ cache_dir }}"
+        - "{{ config_home }}"
+        - "{{ developer_home }}/.local/bin"
+        - "{{ developer_home }}/.local/state/dev-bootstrap"
+    - name: Clear previous configuration backups
+      ansible.builtin.file:
+        path: "{{ config_backup_dir }}"
+        state: absent
+    - name: Create configuration backup directory
+      ansible.builtin.file:
+        path: "{{ config_backup_dir }}"
+        state: directory
+        mode: '0700'
+  tasks:
+    - name: Configure apt repositories
+      ansible.builtin.import_tasks: tasks/repositories.yml
+      become: true
+    - name: Install required packages and selected apt groups
+      ansible.builtin.apt:
+        name: >-
+          {{ (required_apt_packages + (enabled_package_groups | map('extract', apt_package_groups) | flatten | list))
+             | unique | list }}
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+      become: true
+    - name: Link fd-find as fd
+      ansible.builtin.file:
+        src: /usr/bin/fdfind
+        dest: "{{ developer_home }}/.local/bin/fd"
+        state: link
+    - name: Install upstream developer tools
+      ansible.builtin.import_tasks: tasks/toolchains.yml
+      environment:
+        CARGO_HOME: "{{ cargo_dir }}"
+        RUSTUP_HOME: "{{ rustup_dir }}"
+    - name: Install Powerlevel10k fonts
+      ansible.builtin.import_tasks: tasks/fonts.yml
+    - name: Install Oh My Zsh
+      ansible.builtin.git:
+        repo: "{{ oh_my_zsh_repo }}"
+        dest: "{{ oh_my_zsh_dir }}"
+        version: master
+        depth: 1
+        update: false
+    - name: Install Powerlevel10k theme for Oh My Zsh
+      ansible.builtin.git:
+        repo: "{{ powerlevel10k_repo }}"
+        dest: "{{ oh_my_zsh_dir }}/custom/themes/powerlevel10k"
+        version: master
+        depth: 1
+        update: false
+    - name: Install bundled dotfiles
+      ansible.builtin.include_tasks: tasks/dotfile.yml
+      loop:
+        - { source: 'zsh/.zshrc', destination: '{{ developer_home }}/.zshrc' }
+        - { source: 'zsh/.zshenv', destination: '{{ developer_home }}/.zshenv' }
+        - { source: 'zsh/.p10k.zsh', destination: '{{ developer_home }}/.p10k.zsh' }
+        - { source: 'tmux/.tmux.conf', destination: '{{ developer_home }}/.tmux.conf' }
+        - { source: 'nvim', destination: '{{ config_home }}/nvim' }
+      loop_control:
+        loop_var: dotfile
+    - name: Check Neovim configuration
+      ansible.builtin.stat:
+        path: "{{ config_home }}/nvim"
+      register: nvim_config
+    - name: Clone Kickstart if no existing or bundled configuration exists
+      ansible.builtin.git:
+        repo: "{{ kickstart_repo }}"
+        dest: "{{ config_home }}/nvim"
+        update: false
+      when: not nvim_config.stat.exists
+    - name: Create zsh configuration if none is present
+      ansible.builtin.copy:
+        dest: "{{ developer_home }}/.zshrc"
+        force: false
+        mode: '0644'
+        content: |
+          if [[ -r "${XDG_CACHE_HOME:-$HOME/.cache}/p10k-instant-prompt-${(%):-%n}.zsh" ]]; then
+            source "${XDG_CACHE_HOME:-$HOME/.cache}/p10k-instant-prompt-${(%):-%n}.zsh"
+          fi
+          export ZSH={{ oh_my_zsh_dir | quote }}
+          ZSH_THEME="powerlevel10k/powerlevel10k"
+          plugins=(git)
+          export EDITOR=nvim
+          export VISUAL=nvim
+          export SUDO_EDITOR=nvim
+          source "$ZSH/oh-my-zsh.sh"
+          [[ ! -f "$HOME/.p10k.zsh" ]] || source "$HOME/.p10k.zsh"
+    - name: Ensure tool paths and nvm load in interactive zsh
+      ansible.builtin.blockinfile:
+        path: "{{ developer_home }}/.zshrc"
+        create: true
+        mode: '0644'
+        marker: '# {mark} dev-bootstrap toolchain environment'
+        backup: true
+        block: |
+          typeset -U path PATH
+          export CARGO_HOME=${CARGO_HOME:-{{ cargo_dir | quote }}}
+          export RUSTUP_HOME=${RUSTUP_HOME:-{{ rustup_dir | quote }}}
+          path=("$HOME/.local/bin" /usr/local/go/bin /usr/local/bin "$HOME/go/bin" "$CARGO_HOME/bin" $path)
+          export PATH
+          export NVM_DIR="$HOME/.nvm"
+          [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+    - name: Set zsh as login shell
+      ansible.builtin.user:
+        name: "{{ developer_user }}"
+        shell: /usr/bin/zsh
+      become: true
+      when: set_zsh_default | bool
+    - name: Enable workstation services
+      ansible.builtin.service:
+        name: "{{ item.service }}"
+        state: started
+        enabled: true
+      loop:
+        - { group: docker, service: docker }
+        - { group: virtualization, service: libvirtd }
+        - { group: databases, service: postgresql }
+      when: item.group in enabled_package_groups
+      become: true
+    - name: Allow developer to manage local VMs
+      ansible.builtin.user:
+        name: "{{ developer_user }}"
+        groups: libvirt,kvm
+        append: true
+      when: "'virtualization' in enabled_package_groups"
+      become: true
+    - name: Optionally allow Docker without sudo
+      ansible.builtin.user:
+        name: "{{ developer_user }}"
+        groups: docker
+        append: true
+      when: "'docker' in enabled_package_groups and docker_without_sudo | bool"
+      become: true
+    - name: Check local KVM device
+      ansible.builtin.stat:
+        path: /dev/kvm
+      register: kvm_device
+      when: "'virtualization' in enabled_package_groups"
+    - name: Report unavailable KVM acceleration
+      ansible.builtin.debug:
+        msg: /dev/kvm is unavailable. Enable hardware virtualization in firmware (or nested virtualization on a VM).
+      when: "'virtualization' in enabled_package_groups and not kvm_device.stat.exists"
+    - name: Report completion
+      ansible.builtin.debug:
+        msg:
+          - "Config backups: {{ config_backup_dir }}"
+          - Log out and in for shell/group changes. Start nvim to download its plugins.
+          - Select MesloLGS NF in your terminal's font preferences.
+          - Local KVM requires virtualization enabled in firmware and access to /dev/kvm.

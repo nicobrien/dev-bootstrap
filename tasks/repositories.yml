@@ -1,0 +1,61 @@
+---
+- name: Install repository prerequisites
+  ansible.builtin.apt:
+    name: [ca-certificates, curl, gnupg, python3-apt]
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+- name: Create apt keyring directory
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: '0755'
+- name: Download Docker repository key
+  ansible.builtin.get_url:
+    url: "https://download.docker.com/linux/{{ repo_os }}/gpg"
+    dest: /etc/apt/keyrings/docker.asc
+    mode: '0644'
+  when: "'docker' in enabled_package_groups"
+- name: Configure Docker repository
+  ansible.builtin.apt_repository:
+    repo: "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/{{ repo_os }} {{ repo_suite }} stable"
+    filename: dev-bootstrap-docker
+    update_cache: false
+  when: "'docker' in enabled_package_groups"
+- name: Download Kubernetes repository key
+  ansible.builtin.get_url:
+    url: "https://pkgs.k8s.io/core:/stable:/{{ kubernetes_minor_version }}/deb/Release.key"
+    dest: /etc/apt/keyrings/kubernetes.asc
+    mode: '0644'
+  when: "'kubernetes' in enabled_package_groups"
+- name: Configure Kubernetes repository
+  ansible.builtin.apt_repository:
+    repo: "deb [signed-by=/etc/apt/keyrings/kubernetes.asc] https://pkgs.k8s.io/core:/stable:/{{ kubernetes_minor_version }}/deb/ /"
+    filename: dev-bootstrap-kubernetes
+    update_cache: false
+  when: "'kubernetes' in enabled_package_groups"
+- name: Install Ubuntu repository helper
+  ansible.builtin.apt:
+    name: software-properties-common
+    state: present
+  when: "'dotnet' in enabled_package_groups and repo_os == 'ubuntu' and repo_suite in ['jammy', 'noble']"
+- name: Configure Ubuntu .NET backports
+  ansible.builtin.apt_repository:
+    repo: ppa:dotnet/backports
+    codename: "{{ repo_suite }}"
+    filename: dev-bootstrap-dotnet
+    update_cache: false
+  when: "'dotnet' in enabled_package_groups and repo_os == 'ubuntu' and repo_suite in ['jammy', 'noble']"
+- name: Download Microsoft Debian repository configuration
+  ansible.builtin.get_url:
+    url: "https://packages.microsoft.com/config/debian/{{ distro.stdout_lines[2] }}/packages-microsoft-prod.deb"
+    dest: /var/tmp/dev-bootstrap-microsoft-prod.deb
+    mode: '0644'
+  when: "'dotnet' in enabled_package_groups and repo_os == 'debian'"
+- name: Install Microsoft Debian repository configuration
+  ansible.builtin.apt:
+    deb: /var/tmp/dev-bootstrap-microsoft-prod.deb
+  when: "'dotnet' in enabled_package_groups and repo_os == 'debian'"
+- name: Refresh apt after repository setup
+  ansible.builtin.apt:
+    update_cache: true

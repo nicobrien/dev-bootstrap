@@ -1,0 +1,45 @@
+---
+- name: Download verified archive
+  ansible.builtin.get_url:
+    url: "{{ archive.url }}"
+    checksum: "{{ archive.checksum }}"
+    dest: "{{ cache_dir }}/{{ archive.name }}.tar.gz"
+    mode: '0644'
+- name: Create version-specific installation directory
+  ansible.builtin.file:
+    path: "/opt/dev-bootstrap/{{ archive.name }}"
+    state: directory
+    mode: '0755'
+  become: true
+- name: Extract into version-specific directory
+  ansible.builtin.unarchive:
+    src: "{{ cache_dir }}/{{ archive.name }}.tar.gz"
+    dest: "/opt/dev-bootstrap/{{ archive.name }}"
+    remote_src: true
+    owner: root
+    group: root
+  become: true
+- name: Verify extracted tool runs
+  ansible.builtin.command:
+    argv:
+      - "/opt/dev-bootstrap/{{ archive.name }}/{{ archive.binary }}"
+      - "{{ archive.version_arg }}"
+  changed_when: false
+- name: Inspect public installation path
+  ansible.builtin.stat:
+    path: "{{ archive.link }}"
+    follow: false
+  register: public_path
+- name: Preserve existing public installation
+  ansible.builtin.command:
+    argv: [mv, '--', '{{ archive.link }}', '{{ archive.link }}.backup-{{ ansible_facts.date_time.epoch }}']
+  when:
+    - public_path.stat.exists
+    - public_path.stat.lnk_source | default('') != '/opt/dev-bootstrap/' + archive.name + '/' + archive.link_source
+  become: true
+- name: Link versioned installation
+  ansible.builtin.file:
+    src: "/opt/dev-bootstrap/{{ archive.name }}/{{ archive.link_source }}"
+    dest: "{{ archive.link }}"
+    state: link
+  become: true

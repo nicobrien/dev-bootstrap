@@ -1,0 +1,128 @@
+---
+- name: Install pinned Go and Neovim archives
+  ansible.builtin.include_tasks: archive.yml
+  loop:
+    - name: 'go-{{ go_version }}'
+      url: '{{ go_download_url }}'
+      checksum: '{{ go_download_checksum }}'
+      binary: go/bin/go
+      version_arg: version
+      link: /usr/local/go
+      link_source: go
+    - name: 'nvim-{{ nvim_version }}'
+      url: '{{ nvim_download_url }}'
+      checksum: '{{ nvim_download_checksum }}'
+      binary: nvim-linux-x86_64/bin/nvim
+      version_arg: --version
+      link: /usr/local/bin/nvim
+      link_source: nvim-linux-x86_64/bin/nvim
+  loop_control:
+    loop_var: archive
+- name: Inspect existing user rustup
+  ansible.builtin.command:
+    argv: ['{{ cargo_dir }}/bin/rustup', '--version']
+  register: rustup_existing
+  failed_when: false
+  changed_when: false
+  check_mode: false
+- name: Install pinned rustup when missing or a different version is present
+  when: rustup_existing.rc != 0 or ('rustup ' + rustup_version + ' ') not in rustup_existing.stdout
+  block:
+    - name: Download verified rustup installer
+      ansible.builtin.get_url:
+        url: "{{ rustup_download_url }}"
+        checksum: "{{ rustup_download_checksum }}"
+        dest: "{{ cache_dir }}/rustup-init-{{ rustup_version }}"
+        mode: '0700'
+    - name: Install rustup without altering dotfiles
+      ansible.builtin.command:
+        argv: ['{{ cache_dir }}/rustup-init-{{ rustup_version }}', '-y', '--no-modify-path', '--default-toolchain', none]
+- name: Check rustup settings file
+  ansible.builtin.stat:
+    path: "{{ rustup_dir }}/settings.toml"
+  register: rustup_settings_file
+- name: Read rustup self-update setting
+  ansible.builtin.slurp:
+    src: "{{ rustup_dir }}/settings.toml"
+  register: rustup_settings
+  when: rustup_settings_file.stat.exists
+- name: Disable automatic rustup self updates
+  ansible.builtin.command:
+    argv: ['{{ cargo_dir }}/bin/rustup', set, auto-self-update, disable]
+  when: "'auto_self_update = \"disable\"' not in (rustup_settings.content | default('') | b64decode)"
+- name: Check rustup executable
+  ansible.builtin.stat:
+    path: "{{ cargo_dir }}/bin/rustup"
+    follow: true
+  register: rustup_executable
+- name: List installed Rust toolchains
+  ansible.builtin.command:
+    argv: ['{{ cargo_dir }}/bin/rustup', toolchain, list]
+  register: rust_toolchains
+  changed_when: false
+  check_mode: false
+  when: rustup_executable.stat.exists
+- name: Install Rust toolchain if absent
+  ansible.builtin.command:
+    argv: ['{{ cargo_dir }}/bin/rustup', toolchain, install, '{{ rust_toolchain }}', '--profile', default, '--no-self-update']
+  when: "rust_toolchain + '-x86_64-unknown-linux-gnu' not in (rust_toolchains.stdout | default(''))"
+- name: Read default Rust toolchain
+  ansible.builtin.command:
+    argv: ['{{ cargo_dir }}/bin/rustup', default]
+  register: rust_default
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: rustup_executable.stat.exists
+- name: Set default Rust toolchain
+  ansible.builtin.command:
+    argv: ['{{ cargo_dir }}/bin/rustup', default, '{{ rust_toolchain }}']
+  when: "rust_toolchain + '-x86_64-unknown-linux-gnu' not in (rust_default.stdout | default(''))"
+- name: Install tree-sitter CLI for Kickstart
+  ansible.builtin.command:
+    argv: ['{{ cargo_dir }}/bin/cargo', install, tree-sitter-cli, '--locked']
+    creates: "{{ cargo_dir }}/bin/tree-sitter"
+  environment:
+    PATH: "{{ cargo_dir }}/bin:{{ ansible_facts.env.PATH }}"
+- name: Install nvm from its tagged repository
+  ansible.builtin.git:
+    repo: https://github.com/nvm-sh/nvm.git
+    dest: "{{ nvm_dir }}"
+    version: "{{ nvm_version }}"
+    force: false
+- name: Install Node through nvm
+  ansible.builtin.shell: |
+    . "$NVM_DIR/nvm.sh"
+    nvm install "$BOOTSTRAP_NODE_VERSION"
+  args:
+    executable: /bin/bash
+    creates: "{{ nvm_dir }}/versions/node/v{{ node_version }}/bin/node"
+  environment:
+    NVM_DIR: "{{ nvm_dir }}"
+    BOOTSTRAP_NODE_VERSION: "{{ node_version }}"
+- name: Set default Node version
+  ansible.builtin.copy:
+    content: "{{ node_version }}\n"
+    dest: "{{ nvm_dir }}/alias/default"
+    mode: '0644'
+- name: Inspect pnpm for the selected Node version
+  ansible.builtin.command:
+    argv: ['{{ node_bin_dir }}/pnpm', '--version']
+  environment:
+    PATH: "{{ node_bin_dir }}:{{ ansible_facts.env.PATH }}"
+  register: pnpm_existing
+  changed_when: false
+  failed_when: false
+  check_mode: false
+- name: Install pnpm through the selected Node npm
+  ansible.builtin.command:
+    argv:
+      - '{{ node_bin_dir }}/npm'
+      - install
+      - '--global'
+      - '--prefix'
+      - '{{ nvm_dir }}/versions/node/v{{ node_version }}'
+      - 'pnpm@{{ pnpm_version }}'
+  environment:
+    PATH: "{{ node_bin_dir }}:{{ ansible_facts.env.PATH }}"
+  when: pnpm_existing.rc != 0 or pnpm_existing.stdout | trim != pnpm_version

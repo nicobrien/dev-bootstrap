@@ -1,0 +1,30 @@
+---
+- name: Check bundled source
+  ansible.builtin.stat:
+    path: "{{ playbook_dir }}/dotfiles/{{ dotfile.source }}"
+  register: bundled_config
+- name: Link supplied configuration
+  when: bundled_config.stat.exists
+  block:
+    - name: Inspect existing destination
+      ansible.builtin.stat:
+        path: "{{ dotfile.destination }}"
+        follow: false
+      register: existing_config
+    - name: Back up current configuration
+      ansible.builtin.command:
+        argv:
+          - mv
+          - --
+          - "{{ dotfile.destination }}"
+          - "{{ config_backup_dir }}/{{ dotfile.source | replace('/', '_') }}"
+      when: existing_config.stat.exists
+    - name: Create configuration symlink
+      ansible.builtin.file:
+        src: "{{ playbook_dir }}/dotfiles/{{ dotfile.source }}"
+        dest: "{{ dotfile.destination }}"
+        state: link
+- name: Report missing bundled configuration
+  ansible.builtin.debug:
+    msg: "No dotfiles/{{ dotfile.source }} supplied; existing configuration retained."
+  when: not bundled_config.stat.exists
